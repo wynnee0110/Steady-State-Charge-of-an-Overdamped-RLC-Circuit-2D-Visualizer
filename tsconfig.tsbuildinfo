@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/main.tsx","./src/components/CircuitSchematic.tsx","./src/components/Header.tsx","./src/components/ParameterSidebar.tsx","./src/components/VerificationModal.tsx","./src/components/WaveformChart.tsx","./src/rlc/rlcModel.test.ts","./src/rlc/rlcModel.ts"],"version":"5.9.3"}
