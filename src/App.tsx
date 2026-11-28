@@ -1,18 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { PRESETS, RLCParams, analyzeRLC, evaluateRLC } from './rlc/rlcModel';
-import { Header, ThemeMode } from './components/Header';
+import { RLCParams, ThemeMode, analyzeRLC, evaluateRLC } from './rlc/rlcModel';
+import { downloadMatplotlibFigure } from './rlc/exportFigure';
 import { FocusedComponent, ParameterSidebar } from './components/ParameterSidebar';
 import { CircuitSchematic } from './components/CircuitSchematic';
 import { WaveformChart } from './components/WaveformChart';
-import { VerificationModal } from './components/VerificationModal';
+import { SolutionDrawer } from './components/SolutionDrawer';
 
 const STORAGE_THEME_KEY = 'rlc_theme_v1';
 
+const INITIAL_PARAMS: RLCParams = {
+  R: 40.0,
+  L: 0.5,
+  C: 0.002,
+  E0: 24.0,
+  gamma: 60.0,
+  q0: 0.0,
+  i0: 0.0,
+};
+
 export function App() {
-  const [activePresetId, setActivePresetId] = useState<'case1' | 'case2' | 'case3' | null>('case1');
-  const [params, setParams] = useState<RLCParams>(() => ({ ...PRESETS[0].params }));
-  const [windowSpan, setWindowSpan] = useState<number>(PRESETS[0].tMax);
-  const [checkpoints, setCheckpoints] = useState<number[]>(PRESETS[0].checkpoints);
+  const [params, setParams] = useState<RLCParams>(INITIAL_PARAMS);
+  const [windowSpan, setWindowSpan] = useState<number>(0.4);
 
   const [theme, setTheme] = useState<ThemeMode>(() => {
     try {
@@ -28,12 +36,11 @@ export function App() {
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(0.1);
   const [focusedComponent, setFocusedComponent] = useState<FocusedComponent>(null);
-  const [verifyOpen, setVerifyOpen] = useState<boolean>(false);
+  const [drawerOpen, setDrawerOpen] = useState<boolean>(false);
 
   const system = useMemo(() => analyzeRLC(params), [params]);
   const instant = useMemo(() => evaluateRLC(system, currentTime), [system, currentTime]);
 
-  // Apply theme attribute
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     try {
@@ -43,7 +50,6 @@ export function App() {
     }
   }, [theme]);
 
-  // Refs for smooth requestAnimationFrame loop without re-subscribing
   const isPlayingRef = useRef(isPlaying);
   const speedRef = useRef(playbackSpeed);
   const timeRef = useRef(currentTime);
@@ -73,21 +79,7 @@ export function App() {
     return () => cancelAnimationFrame(rafId);
   }, []);
 
-  const handleSelectPreset = useCallback((id: 'case1' | 'case2' | 'case3') => {
-    const found = PRESETS.find((p) => p.id === id);
-    if (!found) return;
-    setActivePresetId(found.id);
-    setParams({ ...found.params });
-    setWindowSpan(found.tMax);
-    setCheckpoints(found.checkpoints);
-    timeRef.current = 0;
-    setCurrentTime(0);
-    setIsPlaying(true);
-    setFocusedComponent(null);
-  }, []);
-
   const handleChangeParams = useCallback((patch: Partial<RLCParams>) => {
-    setActivePresetId(null);
     setParams((prev) => ({ ...prev, ...patch }));
   }, []);
 
@@ -102,7 +94,6 @@ export function App() {
     setCurrentTime(0);
   }, []);
 
-  // Keyboard shortcuts: Space (play/pause), R (reset), 1/2/3 (presets), Escape (close modal)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
@@ -113,36 +104,25 @@ export function App() {
         setIsPlaying((p) => !p);
       } else if (e.key.toLowerCase() === 'r') {
         handleReset();
-      } else if (e.key === '1') {
-        handleSelectPreset('case1');
-      } else if (e.key === '2') {
-        handleSelectPreset('case2');
-      } else if (e.key === '3') {
-        handleSelectPreset('case3');
       } else if (e.key === 'Escape') {
-        setVerifyOpen(false);
+        setDrawerOpen(false);
+        setFocusedComponent(null);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [handleReset, handleSelectPreset]);
+  }, [handleReset]);
 
   return (
     <div className="rlc-shell">
-      <Header
-        activePresetId={activePresetId}
-        theme={theme}
-        onSelectPreset={handleSelectPreset}
-        onOpenVerification={() => setVerifyOpen(true)}
-        onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
-      />
-
       <main className="rlc-workspace">
         <ParameterSidebar
           params={params}
           system={system}
+          theme={theme}
           focusedComponent={focusedComponent}
           onChangeParams={handleChangeParams}
+          onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
         />
 
         <div className="rlc-stage">
@@ -159,7 +139,6 @@ export function App() {
             instant={instant}
             currentTime={currentTime}
             windowSpan={windowSpan}
-            checkpoints={checkpoints}
             isPlaying={isPlaying}
             playbackSpeed={playbackSpeed}
             theme={theme}
@@ -168,17 +147,24 @@ export function App() {
             onScrubTime={handleScrubTime}
             onChangeSpeed={setPlaybackSpeed}
             onChangeWindowSpan={setWindowSpan}
+            onExportFigure={() =>
+              downloadMatplotlibFigure(system, currentTime, windowSpan)
+            }
           />
         </div>
       </main>
 
-      {verifyOpen && (
-        <VerificationModal
-          system={system}
-          checkpoints={checkpoints}
-          onClose={() => setVerifyOpen(false)}
-        />
-      )}
+      <SolutionDrawer
+        open={drawerOpen}
+        system={system}
+        currentTime={currentTime}
+        onToggle={() => setDrawerOpen((o) => !o)}
+        onClose={() => {
+          setDrawerOpen(false);
+          setFocusedComponent(null);
+        }}
+        onHighlightComponent={setFocusedComponent}
+      />
     </div>
   );
 }

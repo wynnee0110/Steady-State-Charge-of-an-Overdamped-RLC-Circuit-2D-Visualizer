@@ -1,16 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Pause, Play, RotateCcw } from 'lucide-react';
-import { RLCInstantState, RLCSystem, evaluateRLC, sampleWaveforms } from '../rlc/rlcModel';
-import { ThemeMode } from './Header';
-
-type ChartMode = 'charge' | 'current_voltage';
+import { Camera, Pause, Play, RotateCcw, ZoomIn, ZoomOut } from 'lucide-react';
+import { RLCInstantState, RLCSystem, ThemeMode, evaluateRLC, sampleWaveforms } from '../rlc/rlcModel';
 
 interface WaveformChartProps {
   system: RLCSystem;
   instant: RLCInstantState;
   currentTime: number;
   windowSpan: number;
-  checkpoints: number[];
   isPlaying: boolean;
   playbackSpeed: number;
   theme: ThemeMode;
@@ -19,17 +15,36 @@ interface WaveformChartProps {
   onScrubTime: (t: number) => void;
   onChangeSpeed: (s: number) => void;
   onChangeWindowSpan: (span: number) => void;
+  onExportFigure: () => void;
 }
 
 const SPEED_OPTIONS = [0.05, 0.1, 0.25, 0.5, 1];
-const SPAN_OPTIONS = [0.25, 0.4, 0.5, 1.0];
+const MIN_SPAN = 0.04;
+const MAX_SPAN = 2.5;
+const DEFAULT_SPAN = 0.4;
+
+/** Round upward to clean oscilloscope graticule scale (1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10 × 10^n). */
+function niceCeil(val: number): number {
+  const safe = Math.max(1e-6, val);
+  const exp = Math.floor(Math.log10(safe));
+  const pow = Math.pow(10, exp);
+  const norm = safe / pow;
+  const steps = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];
+  for (const s of steps) {
+    if (norm <= s + 1e-9) return s * pow;
+  }
+  return 10 * pow;
+}
+
+function clampSpan(span: number): number {
+  return Math.max(MIN_SPAN, Math.min(MAX_SPAN, span));
+}
 
 export const WaveformChart: React.FC<WaveformChartProps> = ({
   system,
   instant,
   currentTime,
   windowSpan,
-  checkpoints,
   isPlaying,
   playbackSpeed,
   theme,
@@ -38,19 +53,21 @@ export const WaveformChart: React.FC<WaveformChartProps> = ({
   onScrubTime,
   onChangeSpeed,
   onChangeWindowSpan,
+  onExportFigure,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState({ w: 720, h: 280 });
-  const [mode, setMode] = useState<ChartMode>('charge');
   const [showTotal, setShowTotal] = useState(true);
   const [showSteady, setShowSteady] = useState(true);
   const [showTransient, setShowTransient] = useState(true);
-  const [showCheckpoints, setShowCheckpoints] = useState(true);
-  const [showCurrent, setShowCurrent] = useState(true);
-  const [showVoltage, setShowVoltage] = useState(true);
-  const [hoverInfo, setHoverInfo] = useState<{ x: number; y: number; state: RLCInstantState } | null>(null);
+  const [hoverInfo, setHoverInfo] = useState<RLCInstantState | null>(null);
   const draggingRef = useRef(false);
+
+  const windowSpanRef = useRef(windowSpan);
+  const onChangeSpanRef = useRef(onChangeWindowSpan);
+  windowSpanRef.current = windowSpan;
+  onChangeSpanRef.current = onChangeWindowSpan;
 
   useEffect(() => {
     const obs = new ResizeObserver((entries) => {
@@ -65,33 +82,34 @@ export const WaveformChart: React.FC<WaveformChartProps> = ({
     return () => obs.disconnect();
   }, []);
 
-  // Rolling viewport: sweeps 0 -> currentTime during initial startup, then scrolls smoothly
+  // Non-passive wheel listener for smooth zoom in/out without page scroll warnings
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 0.85 : 1 / 0.85;
+      onChangeSpanRef.current(clampSpan(windowSpanRef.current * factor));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
+  // Rolling viewport: sweeps 0 -> currentTime during startup, then scrolls smoothly
   const tStart = currentTime > windowSpan ? currentTime - windowSpan : 0;
   const tEnd = currentTime > windowSpan ? currentTime : windowSpan;
   const drawEnd = currentTime;
 
-  // Stable, non-jittering Y-axis bounds computed from startup + steady state
-  const { yMaxLeft, yMaxRight } = useMemo(() => {
-    const refHorizon = Math.max(windowSpan, system.tSettle, 0.5);
+  // Fixed, non-jittering round Y-axis bounds for Charge q(t)
+  const yMaxLeft = useMemo(() => {
+    const refHorizon = Math.max(0.6, system.tSettle * 1.25);
     const refSamples = sampleWaveforms(system, refHorizon, 400);
-    if (mode === 'charge') {
-      let maxAbsMc = Math.max(1, system.Qmax * 1000);
-      for (const s of refSamples) {
-        if (showTotal) maxAbsMc = Math.max(maxAbsMc, Math.abs(s.q * 1000));
-        if (showSteady) maxAbsMc = Math.max(maxAbsMc, Math.abs(s.qp * 1000));
-        if (showTransient) maxAbsMc = Math.max(maxAbsMc, Math.abs(s.qh * 1000));
-      }
-      return { yMaxLeft: maxAbsMc * 1.15, yMaxRight: 1 };
-    } else {
-      let maxI = Math.max(0.05, system.Imax);
-      let maxE = Math.max(1, Math.abs(system.params.E0));
-      for (const s of refSamples) {
-        maxI = Math.max(maxI, Math.abs(s.i));
-        maxE = Math.max(maxE, Math.abs(s.E));
-      }
-      return { yMaxLeft: maxI * 1.18, yMaxRight: maxE * 1.18 };
+    let maxAbsMc = Math.max(1, system.Qmax * 1000);
+    for (const s of refSamples) {
+      maxAbsMc = Math.max(maxAbsMc, Math.abs(s.q * 1000), Math.abs(s.qp * 1000), Math.abs(s.qh * 1000));
     }
-  }, [system, windowSpan, mode, showTotal, showSteady, showTransient]);
+    return niceCeil(maxAbsMc * 1.08);
+  }, [system]);
 
   // Visible samples strictly from tStart to drawEnd
   const visibleSamples = useMemo(() => {
@@ -108,7 +126,7 @@ export const WaveformChart: React.FC<WaveformChartProps> = ({
     return out;
   }, [system, tStart, drawEnd]);
 
-  const pad = { left: 54, right: mode === 'current_voltage' ? 50 : 22, top: 18, bottom: 28 };
+  const pad = { left: 52, right: 20, top: 16, bottom: 26 };
 
   const plotToTime = (clientX: number): number => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -129,14 +147,12 @@ export const WaveformChart: React.FC<WaveformChartProps> = ({
     if (!ctx) return;
 
     const isDark = theme === 'dark';
-    const gridCol = isDark ? 'rgba(148, 163, 184, 0.09)' : 'rgba(100, 116, 139, 0.12)';
-    const axisZero = isDark ? 'rgba(148, 163, 184, 0.28)' : 'rgba(100, 116, 139, 0.35)';
-    const textMuted = isDark ? '#788296' : '#64748b';
+    const gridCol = isDark ? 'rgba(148, 163, 184, 0.08)' : 'rgba(100, 116, 139, 0.11)';
+    const axisZero = isDark ? 'rgba(148, 163, 184, 0.25)' : 'rgba(100, 116, 139, 0.32)';
+    const textMuted = isDark ? '#707a8e' : '#64748b';
     const colQ = isDark ? '#34d399' : '#059669';
     const colQp = isDark ? '#38bdf8' : '#0284c7';
     const colQh = isDark ? '#f59e0b' : '#d97706';
-    const colI = isDark ? '#a78bfa' : '#7c3aed';
-    const colE = isDark ? '#f43f5e' : '#e11d48';
 
     const w = size.w;
     const h = size.h;
@@ -149,15 +165,14 @@ export const WaveformChart: React.FC<WaveformChartProps> = ({
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, w, h);
 
-    const valToYLeft = (v: number) => pad.top + plotH / 2 - (v / yMaxLeft) * (plotH / 2);
-    const valToYRight = (v: number) => pad.top + plotH / 2 - (v / yMaxRight) * (plotH / 2);
+    const valToY = (v: number) => pad.top + plotH / 2 - (v / yMaxLeft) * (plotH / 2);
 
-    // Grid lines
+    // Fixed 10 × 4 oscilloscope graticule
     ctx.strokeStyle = gridCol;
     ctx.lineWidth = 1;
     ctx.beginPath();
-    for (let i = 0; i <= 5; i++) {
-      const gx = pad.left + (i / 5) * plotW;
+    for (let i = 0; i <= 10; i++) {
+      const gx = pad.left + (i / 10) * plotW;
       ctx.moveTo(gx, pad.top);
       ctx.lineTo(gx, pad.top + plotH);
     }
@@ -175,86 +190,75 @@ export const WaveformChart: React.FC<WaveformChartProps> = ({
     ctx.lineTo(pad.left + plotW, pad.top + plotH / 2);
     ctx.stroke();
 
-    // Y-axis tick labels
+    // Fixed Y-axis tick labels
     ctx.fillStyle = textMuted;
     ctx.font = '500 10.5px "JetBrains Mono", monospace';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    const leftTicks = [yMaxLeft, yMaxLeft / 2, 0, -yMaxLeft / 2, -yMaxLeft];
-    leftTicks.forEach((v, idx) => {
+    [yMaxLeft, yMaxLeft / 2, 0, -yMaxLeft / 2, -yMaxLeft].forEach((v, idx) => {
       const y = pad.top + (idx / 4) * plotH;
-      const label = mode === 'charge' ? v.toFixed(1) : v.toFixed(2);
+      const label = Math.abs(v) < 1e-9 ? '0' : Math.abs(v) >= 10 ? v.toFixed(0) : v.toFixed(1);
       ctx.fillText(label, pad.left - 8, y);
     });
 
     ctx.textAlign = 'left';
-    ctx.fillText(mode === 'charge' ? 'q (mC)' : 'i (A)', 8, pad.top + 4);
+    ctx.fillText('mC', 10, pad.top + 2);
 
-    if (mode === 'current_voltage') {
-      ctx.textAlign = 'left';
-      [yMaxRight, 0, -yMaxRight].forEach((v, idx) => {
-        const y = pad.top + (idx / 2) * plotH;
-        ctx.fillText(`${v.toFixed(0)}V`, pad.left + plotW + 6, y);
-      });
-    }
-
-    // Rolling X-axis time labels (ms)
+    // X-axis time labels (ms) aligned to every 2nd graticule division
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    for (let i = 0; i <= 5; i++) {
-      const tVal = tStart + (i / 5) * viewSpan;
+    for (let i = 0; i <= 10; i += 2) {
+      const tVal = tStart + (i / 10) * viewSpan;
       const x = tToX(tVal);
-      ctx.fillText(`${(tVal * 1000).toFixed(0)} ms`, x, pad.top + plotH + 8);
+      ctx.fillText(`${(tVal * 1000).toFixed(0)} ms`, x, pad.top + plotH + 7);
     }
 
-    // Clip to plot area
+    // Clip to graticule area
     ctx.save();
     ctx.beginPath();
     ctx.rect(pad.left, pad.top, plotW, plotH);
     ctx.clip();
 
-    // Steady-state ±Q_max envelope lines in Charge mode
-    if (mode === 'charge') {
-      const qMaxMc = system.Qmax * 1000;
-      const yPos = valToYLeft(qMaxMc);
-      const yNeg = valToYLeft(-qMaxMc);
-      ctx.save();
-      ctx.strokeStyle = isDark ? 'rgba(56, 189, 248, 0.26)' : 'rgba(2, 132, 199, 0.26)';
-      ctx.setLineDash([3, 4]);
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(pad.left, yPos);
-      ctx.lineTo(pad.left + plotW, yPos);
-      ctx.moveTo(pad.left, yNeg);
-      ctx.lineTo(pad.left + plotW, yNeg);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.fillStyle = isDark ? 'rgba(56, 189, 248, 0.72)' : 'rgba(2, 132, 199, 0.78)';
-      ctx.font = '500 10px "JetBrains Mono", monospace';
-      ctx.textAlign = 'right';
-      ctx.textBaseline = 'bottom';
-      ctx.fillText('+Q_max', pad.left + plotW - 4, yPos - 2);
-      ctx.textBaseline = 'top';
-      ctx.fillText('−Q_max', pad.left + plotW - 4, yNeg + 2);
-      ctx.restore();
-    }
+    // Ultra-subtle ±Q_max steady-state reference lines
+    const qMaxMc = system.Qmax * 1000;
+    const yPos = valToY(qMaxMc);
+    const yNeg = valToY(-qMaxMc);
+    ctx.save();
+    ctx.strokeStyle = isDark ? 'rgba(56, 189, 248, 0.2)' : 'rgba(2, 132, 199, 0.2)';
+    ctx.setLineDash([3, 4]);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, yPos);
+    ctx.lineTo(pad.left + plotW, yPos);
+    ctx.moveTo(pad.left, yNeg);
+    ctx.lineTo(pad.left + plotW, yNeg);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = isDark ? 'rgba(56, 189, 248, 0.65)' : 'rgba(2, 132, 199, 0.72)';
+    ctx.font = '500 9.5px "JetBrains Mono", monospace';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText('+Q_max', pad.left + plotW - 4, yPos - 2);
+    ctx.textBaseline = 'top';
+    ctx.fillText('−Q_max', pad.left + plotW - 4, yNeg + 2);
+    ctx.restore();
 
-    // 5*tau_1 settling marker when visible inside [tStart, drawEnd]
+    // Subtle 5*tau_1 settling tick when visible
     if (system.tSettle >= tStart && system.tSettle <= drawEnd) {
       const sx = tToX(system.tSettle);
       ctx.save();
-      ctx.strokeStyle = isDark ? 'rgba(245, 158, 11, 0.5)' : 'rgba(217, 119, 6, 0.5)';
-      ctx.setLineDash([4, 4]);
-      ctx.lineWidth = 1.25;
+      ctx.strokeStyle = isDark ? 'rgba(245, 158, 11, 0.38)' : 'rgba(217, 119, 6, 0.38)';
+      ctx.setLineDash([3, 4]);
+      ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(sx, pad.top);
       ctx.lineTo(sx, pad.top + plotH);
       ctx.stroke();
       ctx.fillStyle = colQh;
-      ctx.font = '600 10px "JetBrains Mono", monospace';
+      ctx.font = '600 9.5px "JetBrains Mono", monospace';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
-      ctx.fillText('5τ₁', Math.min(pad.left + plotW - 26, sx + 4), pad.top + 4);
+      ctx.fillText('5τ₁', Math.min(pad.left + plotW - 24, sx + 4), pad.top + 3);
       ctx.restore();
     }
 
@@ -268,6 +272,8 @@ export const WaveformChart: React.FC<WaveformChartProps> = ({
       ctx.save();
       ctx.strokeStyle = color;
       ctx.lineWidth = lineWidth;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
       ctx.setLineDash(dashed);
       ctx.beginPath();
       visibleSamples.forEach((s, idx) => {
@@ -280,91 +286,27 @@ export const WaveformChart: React.FC<WaveformChartProps> = ({
       ctx.restore();
     };
 
-    if (mode === 'charge') {
-      if (showTransient && visibleSamples.length >= 2) {
-        const yZero = valToYLeft(0);
-        ctx.save();
-        ctx.fillStyle = isDark ? 'rgba(245, 158, 11, 0.09)' : 'rgba(217, 119, 6, 0.08)';
-        ctx.beginPath();
-        ctx.moveTo(tToX(visibleSamples[0].t), yZero);
-        for (const s of visibleSamples) {
-          ctx.lineTo(tToX(s.t), valToYLeft(s.qh * 1000));
-        }
-        ctx.lineTo(tToX(visibleSamples[visibleSamples.length - 1].t), yZero);
-        ctx.closePath();
-        ctx.fill();
-        ctx.restore();
+    if (showTransient) drawSeries((s) => valToY(s.qh * 1000), colQh, 1.6, [5, 4]);
+    if (showSteady) drawSeries((s) => valToY(s.qp * 1000), colQp, 2.1);
+    if (showTotal) drawSeries((s) => valToY(s.q * 1000), colQ, 2.2);
 
-        drawSeries((s) => valToYLeft(s.qh * 1000), colQh, 1.75, [5, 4]);
-      }
-
-      if (showSteady) {
-        drawSeries((s) => valToYLeft(s.qp * 1000), colQp, 2.2);
-      }
-
-      if (showTotal) {
-        drawSeries((s) => valToYLeft(s.q * 1000), colQ, 2.4);
-      }
-
-      // Verification checkpoints scrolling with the trace
-      if (showCheckpoints && showSteady) {
-        for (const cp of checkpoints) {
-          if (cp < tStart || cp > drawEnd) continue;
-          const st = evaluateRLC(system, cp);
-          const cx = tToX(cp);
-          const cy = valToYLeft(st.qp * 1000);
-          ctx.fillStyle = isDark ? '#0f1115' : '#ffffff';
-          ctx.strokeStyle = colQp;
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          ctx.arc(cx, cy, 3.8, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.stroke();
-        }
-      }
-    } else {
-      if (showVoltage) {
-        drawSeries((s) => valToYRight(s.E), colE, 1.7, [4, 4]);
-      }
-      if (showCurrent) {
-        drawSeries((s) => valToYLeft(s.i), colI, 2.3);
-      }
-    }
-
-    // Active sweep head + glowing tip markers at currentTime
+    // Leading-edge dots at currentTime
     const px = tToX(currentTime);
-    ctx.strokeStyle = isDark ? 'rgba(236, 239, 244, 0.42)' : 'rgba(20, 23, 31, 0.35)';
-    ctx.lineWidth = 1.1;
-    ctx.beginPath();
-    ctx.moveTo(px, pad.top);
-    ctx.lineTo(px, pad.top + plotH);
-    ctx.stroke();
-
-    const drawGlowingTip = (y: number, color: string) => {
+    const drawTip = (y: number, color: string) => {
       ctx.save();
       ctx.fillStyle = color;
-      ctx.globalAlpha = 0.24;
       ctx.beginPath();
-      ctx.arc(px, y, 8.5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.globalAlpha = 1;
-      ctx.beginPath();
-      ctx.arc(px, y, 4.2, 0, Math.PI * 2);
+      ctx.arc(px, y, 3.6, 0, Math.PI * 2);
       ctx.fill();
       ctx.strokeStyle = isDark ? '#0f1115' : '#ffffff';
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = 1.4;
       ctx.stroke();
       ctx.restore();
     };
 
-    if (mode === 'charge') {
-      if (showTransient) drawGlowingTip(valToYLeft(instant.qh * 1000), colQh);
-      if (showSteady) drawGlowingTip(valToYLeft(instant.qp * 1000), colQp);
-      if (showTotal) drawGlowingTip(valToYLeft(instant.q * 1000), colQ);
-    } else {
-      if (showVoltage) drawGlowingTip(valToYRight(instant.E), colE);
-      if (showCurrent) drawGlowingTip(valToYLeft(instant.i), colI);
-    }
+    if (showTransient) drawTip(valToY(instant.qh * 1000), colQh);
+    if (showSteady) drawTip(valToY(instant.qp * 1000), colQp);
+    if (showTotal) drawTip(valToY(instant.q * 1000), colQ);
 
     ctx.restore();
     ctx.restore();
@@ -372,21 +314,15 @@ export const WaveformChart: React.FC<WaveformChartProps> = ({
     size,
     visibleSamples,
     yMaxLeft,
-    yMaxRight,
     system,
     instant,
     currentTime,
     tStart,
     tEnd,
     drawEnd,
-    checkpoints,
-    mode,
     showTotal,
     showSteady,
     showTransient,
-    showCheckpoints,
-    showCurrent,
-    showVoltage,
     theme,
     pad.left,
     pad.right,
@@ -395,8 +331,8 @@ export const WaveformChart: React.FC<WaveformChartProps> = ({
   ]);
 
   const isUnsteady = instant.transientRatio > 0.02;
-  const transientPct = Math.min(999, Math.round(instant.transientRatio * 100));
-  const scrubberMax = Math.max(windowSpan * 2, currentTime);
+  const msPerDiv = (windowSpan / 10) * 1000;
+  const isDefaultZoom = Math.abs(windowSpan - DEFAULT_SPAN) < 0.005;
 
   return (
     <div
@@ -409,68 +345,67 @@ export const WaveformChart: React.FC<WaveformChartProps> = ({
         overflow: 'hidden',
       }}
     >
-      {/* Chart Header */}
+      {/* Clean Single-Row Top Bar */}
       <div
         style={{
-          padding: '8px 14px',
+          height: 38,
+          padding: '0 14px',
           borderBottom: '1px solid var(--border-color)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          gap: 10,
-          flexWrap: 'wrap',
+          gap: 12,
+          flexShrink: 0,
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-          {/* Mode Toggle */}
-          <div
+        {/* Left: Topic Label + Trace Toggles + Subtle Status Dot */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, minWidth: 0, overflowX: 'auto' }}>
+          <span
             style={{
-              display: 'flex',
-              background: 'var(--bg-surface)',
-              border: '1px solid var(--border-color)',
-              borderRadius: 7,
-              padding: 2,
-              gap: 2,
+              fontSize: 12,
+              fontWeight: 600,
+              color: 'var(--text-primary)',
+              whiteSpace: 'nowrap',
             }}
           >
-            {(
-              [
-                ['charge', 'Charge q(t)'],
-                ['current_voltage', 'Current & Voltage'],
-              ] as const
-            ).map(([k, label]) => (
-              <button
-                key={k}
-                type="button"
-                onClick={() => setMode(k)}
-                style={{
-                  padding: '3px 9px',
-                  borderRadius: 5,
-                  border: 'none',
-                  background: mode === k ? 'var(--bg-panel)' : 'transparent',
-                  color: mode === k ? 'var(--text-primary)' : 'var(--text-secondary)',
-                  fontSize: 11.5,
-                  fontWeight: mode === k ? 600 : 500,
-                  cursor: 'pointer',
-                }}
-              >
-                {label}
-              </button>
-            ))}
+            Steady-State Charge qₚ(t)
+          </span>
+
+          <div style={{ width: 1, height: 14, background: 'var(--border-color)', flexShrink: 0 }} />
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <LegendToggle
+              active={showSteady}
+              color="var(--trace-qp)"
+              label="qₚ(t)"
+              onClick={() => setShowSteady((v) => !v)}
+            />
+            <LegendToggle
+              active={showTotal}
+              color="var(--trace-q)"
+              label="q(t)"
+              onClick={() => setShowTotal((v) => !v)}
+            />
+            <LegendToggle
+              active={showTransient}
+              color="var(--trace-qh)"
+              label="qₕ(t)"
+              dashed
+              onClick={() => setShowTransient((v) => !v)}
+            />
           </div>
 
-          {/* Live Transient vs Steady-State Pill */}
-          <div
+          <div style={{ width: 1, height: 14, background: 'var(--border-color)', flexShrink: 0 }} />
+
+          <span
             style={{
               display: 'flex',
               alignItems: 'center',
-              gap: 6,
-              padding: '3px 9px',
-              borderRadius: 999,
-              background: isUnsteady ? 'var(--warning-soft)' : 'var(--success-soft)',
-              color: isUnsteady ? 'var(--warning)' : 'var(--success)',
+              gap: 5,
               fontSize: 11,
-              fontWeight: 600,
+              color: isUnsteady ? 'var(--warning)' : 'var(--success)',
+              fontWeight: 500,
+              whiteSpace: 'nowrap',
             }}
           >
             <span
@@ -481,89 +416,95 @@ export const WaveformChart: React.FC<WaveformChartProps> = ({
                 background: isUnsteady ? 'var(--warning)' : 'var(--success)',
               }}
             />
-            <span>{isUnsteady ? `Transient · Unsteady (${transientPct}%)` : 'Steady State'}</span>
-          </div>
-
-          {/* Trace Legend Pills */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-            {mode === 'charge' ? (
-              <>
-                <LegendPill
-                  active={showTotal}
-                  color="var(--trace-q)"
-                  label="Total q(t)"
-                  onClick={() => setShowTotal((v) => !v)}
-                />
-                <LegendPill
-                  active={showSteady}
-                  color="var(--trace-qp)"
-                  label="Steady-State qₚ(t)"
-                  onClick={() => setShowSteady((v) => !v)}
-                />
-                <LegendPill
-                  active={showTransient}
-                  color="var(--trace-qh)"
-                  label="Transient qₕ(t)"
-                  dashed
-                  onClick={() => setShowTransient((v) => !v)}
-                />
-                <LegendPill
-                  active={showCheckpoints}
-                  color="var(--trace-qp)"
-                  label="Checkpoints"
-                  dotOnly
-                  onClick={() => setShowCheckpoints((v) => !v)}
-                />
-              </>
-            ) : (
-              <>
-                <LegendPill
-                  active={showCurrent}
-                  color="var(--trace-i)"
-                  label="Current i(t)"
-                  onClick={() => setShowCurrent((v) => !v)}
-                />
-                <LegendPill
-                  active={showVoltage}
-                  color="var(--trace-e)"
-                  label="Source E(t)"
-                  dashed
-                  onClick={() => setShowVoltage((v) => !v)}
-                />
-              </>
-            )}
-          </div>
+            {isUnsteady ? 'Unsteady' : 'Steady'}
+          </span>
         </div>
 
-        {/* Time Window Span Selector */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Window</span>
-          <div style={{ display: 'flex', gap: 3 }}>
-            {SPAN_OPTIONS.map((opt) => (
-              <button
-                key={opt}
-                type="button"
-                onClick={() => onChangeWindowSpan(opt)}
-                className="mono"
-                style={{
-                  padding: '2px 7px',
-                  borderRadius: 5,
-                  border: '1px solid ' + (Math.abs(windowSpan - opt) < 1e-6 ? 'var(--accent)' : 'var(--border-color)'),
-                  background: Math.abs(windowSpan - opt) < 1e-6 ? 'var(--accent-soft)' : 'var(--bg-surface)',
-                  color: Math.abs(windowSpan - opt) < 1e-6 ? 'var(--accent)' : 'var(--text-secondary)',
-                  fontSize: 11,
-                  cursor: 'pointer',
-                }}
-              >
-                {opt.toFixed(2)}s
-              </button>
-            ))}
-          </div>
+        {/* Right: Zoom Out / ms/div / Zoom In / Matplotlib PNG */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+          <button
+            type="button"
+            title="Zoom Out (wider time span)"
+            disabled={windowSpan >= MAX_SPAN - 1e-4}
+            onClick={() => onChangeWindowSpan(clampSpan(windowSpan / 0.75))}
+            style={zoomBtn(windowSpan >= MAX_SPAN - 1e-4)}
+          >
+            <ZoomOut size={14} />
+          </button>
+
+          <span
+            className="mono"
+            title="Time scale per division (scroll on scope to zoom)"
+            style={{
+              fontSize: 11,
+              color: 'var(--text-secondary)',
+              minWidth: 66,
+              textAlign: 'center',
+            }}
+          >
+            {msPerDiv >= 10 ? msPerDiv.toFixed(0) : msPerDiv.toFixed(1)} ms/div
+          </span>
+
+          <button
+            type="button"
+            title="Zoom In (finer time detail)"
+            disabled={windowSpan <= MIN_SPAN + 1e-4}
+            onClick={() => onChangeWindowSpan(clampSpan(windowSpan * 0.75))}
+            style={zoomBtn(windowSpan <= MIN_SPAN + 1e-4)}
+          >
+            <ZoomIn size={14} />
+          </button>
+
+          {!isDefaultZoom && (
+            <button
+              type="button"
+              title="Reset zoom to 40 ms/div"
+              onClick={() => onChangeWindowSpan(DEFAULT_SPAN)}
+              className="mono"
+              style={{
+                padding: '2px 5px',
+                borderRadius: 4,
+                border: 'none',
+                background: 'transparent',
+                color: 'var(--accent)',
+                fontSize: 10.5,
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              1×
+            </button>
+          )}
+
+          <div style={{ width: 1, height: 14, background: 'var(--border-color)', margin: '0 4px' }} />
+
+          <button
+            type="button"
+            title="Export Matplotlib-style PNG (charge graph, circuit & values)"
+            onClick={onExportFigure}
+            style={{
+              height: 24,
+              padding: '0 6px',
+              borderRadius: 5,
+              border: 'none',
+              background: 'transparent',
+              color: 'var(--text-secondary)',
+              fontSize: 11,
+              fontWeight: 500,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+              cursor: 'pointer',
+            }}
+          >
+            <Camera size={13} />
+            <span className="mono">PNG</span>
+          </button>
         </div>
       </div>
 
-      {/* Plot Canvas */}
-      <div ref={containerRef} style={{ flex: 1, position: 'relative', minHeight: 140 }}>
+      {/* Fixed-Graticule Plot Canvas */}
+      <div ref={containerRef} style={{ flex: 1, position: 'relative', minHeight: 150 }}>
         <canvas
           ref={canvasRef}
           style={{ width: '100%', height: '100%', display: 'block', cursor: 'crosshair' }}
@@ -573,13 +514,8 @@ export const WaveformChart: React.FC<WaveformChartProps> = ({
           }}
           onMouseMove={(e) => {
             const tHover = plotToTime(e.clientX);
-            const rect = canvasRef.current?.getBoundingClientRect();
-            if (rect && tHover <= drawEnd) {
-              setHoverInfo({
-                x: e.clientX - rect.left,
-                y: e.clientY - rect.top,
-                state: evaluateRLC(system, tHover),
-              });
+            if (tHover <= drawEnd) {
+              setHoverInfo(evaluateRLC(system, tHover));
             } else {
               setHoverInfo(null);
             }
@@ -602,44 +538,32 @@ export const WaveformChart: React.FC<WaveformChartProps> = ({
             style={{
               position: 'absolute',
               top: 8,
-              right: mode === 'current_voltage' ? 56 : 20,
-              padding: '4px 9px',
-              borderRadius: 6,
-              background: 'var(--bg-surface)',
-              border: '1px solid var(--border-strong)',
-              fontSize: 11,
-              color: 'var(--text-primary)',
+              right: 18,
+              fontSize: 10.5,
+              color: 'var(--text-secondary)',
               pointerEvents: 'none',
               display: 'flex',
               gap: 10,
             }}
           >
-            <span>t={(hoverInfo.state.t * 1000).toFixed(1)}ms</span>
-            {mode === 'charge' ? (
-              <>
-                <span style={{ color: 'var(--trace-q)' }}>q={(hoverInfo.state.q * 1000).toFixed(2)}mC</span>
-                <span style={{ color: 'var(--trace-qp)' }}>qₚ={(hoverInfo.state.qp * 1000).toFixed(2)}mC</span>
-                <span style={{ color: 'var(--trace-qh)' }}>qₕ={(hoverInfo.state.qh * 1000).toFixed(2)}mC</span>
-              </>
-            ) : (
-              <>
-                <span style={{ color: 'var(--trace-i)' }}>i={(hoverInfo.state.i * 1000).toFixed(1)}mA</span>
-                <span style={{ color: 'var(--trace-e)' }}>E={hoverInfo.state.E.toFixed(1)}V</span>
-              </>
-            )}
+            <span>t={(hoverInfo.t * 1000).toFixed(1)}ms</span>
+            <span style={{ color: 'var(--trace-qp)' }}>qₚ={(hoverInfo.qp * 1000).toFixed(2)}mC</span>
+            <span style={{ color: 'var(--trace-q)' }}>q={(hoverInfo.q * 1000).toFixed(2)}mC</span>
+            <span style={{ color: 'var(--trace-qh)' }}>qₕ={(hoverInfo.qh * 1000).toFixed(2)}mC</span>
           </div>
         )}
       </div>
 
-      {/* Integrated Minimal Playback Bar */}
+      {/* Clean Fixed Bottom Playback Bar */}
       <div
         style={{
-          height: 44,
+          height: 40,
           padding: '0 14px',
           borderTop: '1px solid var(--border-color)',
           background: 'var(--bg-panel)',
           display: 'flex',
           alignItems: 'center',
+          justifyContent: 'space-between',
           gap: 12,
           flexShrink: 0,
         }}
@@ -650,13 +574,13 @@ export const WaveformChart: React.FC<WaveformChartProps> = ({
             title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
             onClick={onTogglePlay}
             style={{
-              height: 28,
-              padding: '0 11px',
+              height: 26,
+              padding: '0 10px',
               borderRadius: 6,
               border: 'none',
               background: isPlaying ? 'var(--accent-soft)' : 'var(--accent)',
               color: isPlaying ? 'var(--accent)' : '#ffffff',
-              fontSize: 12,
+              fontSize: 11.5,
               fontWeight: 600,
               display: 'flex',
               alignItems: 'center',
@@ -664,7 +588,7 @@ export const WaveformChart: React.FC<WaveformChartProps> = ({
               cursor: 'pointer',
             }}
           >
-            {isPlaying ? <Pause size={13} /> : <Play size={13} />}
+            {isPlaying ? <Pause size={12} /> : <Play size={12} />}
             <span>{isPlaying ? 'Pause' : 'Play'}</span>
           </button>
 
@@ -673,39 +597,28 @@ export const WaveformChart: React.FC<WaveformChartProps> = ({
             title="Replay unsteady startup from t = 0 (R)"
             onClick={onReset}
             style={{
-              height: 28,
-              padding: '0 9px',
+              height: 26,
+              padding: '0 8px',
               borderRadius: 6,
-              border: '1px solid var(--border-color)',
-              background: 'var(--bg-surface)',
+              border: 'none',
+              background: 'transparent',
               color: 'var(--text-secondary)',
               fontSize: 11.5,
               fontWeight: 500,
               display: 'flex',
               alignItems: 'center',
-              gap: 5,
+              gap: 4,
               cursor: 'pointer',
             }}
           >
             <RotateCcw size={12} />
             <span>Replay</span>
           </button>
+
+          <span className="mono" style={{ marginLeft: 8, fontSize: 11.5, color: 'var(--text-secondary)' }}>
+            t = {(currentTime * 1000).toFixed(1)} ms
+          </span>
         </div>
-
-        <input
-          className="rlc-slider"
-          type="range"
-          min={0}
-          max={scrubberMax}
-          step={scrubberMax / 500}
-          value={Math.min(scrubberMax, currentTime)}
-          onChange={(e) => onScrubTime(parseFloat(e.target.value))}
-          style={{ flex: 1 }}
-        />
-
-        <span className="mono" style={{ fontSize: 11.5, color: 'var(--text-secondary)', minWidth: 88, textAlign: 'right' }}>
-          t = {(currentTime * 1000).toFixed(1)} ms
-        </span>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
           {SPEED_OPTIONS.map((sp) => {
@@ -719,7 +632,7 @@ export const WaveformChart: React.FC<WaveformChartProps> = ({
                 style={{
                   padding: '3px 6px',
                   borderRadius: 5,
-                  border: '1px solid ' + (active ? 'var(--accent)' : 'var(--border-color)'),
+                  border: 'none',
                   background: active ? 'var(--accent-soft)' : 'transparent',
                   color: active ? 'var(--accent)' : 'var(--text-muted)',
                   fontSize: 10.5,
@@ -737,50 +650,54 @@ export const WaveformChart: React.FC<WaveformChartProps> = ({
   );
 };
 
-const LegendPill: React.FC<{
+function zoomBtn(disabled: boolean): React.CSSProperties {
+  return {
+    width: 24,
+    height: 24,
+    borderRadius: 5,
+    border: 'none',
+    background: 'transparent',
+    color: 'var(--text-secondary)',
+    opacity: disabled ? 0.35 : 1,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    cursor: disabled ? 'default' : 'pointer',
+  };
+}
+
+const LegendToggle: React.FC<{
   active: boolean;
   color: string;
   label: string;
   dashed?: boolean;
-  dotOnly?: boolean;
   onClick: () => void;
-}> = ({ active, color, label, dashed, dotOnly, onClick }) => (
+}> = ({ active, color, label, dashed, onClick }) => (
   <button
     type="button"
     onClick={onClick}
     style={{
       display: 'flex',
       alignItems: 'center',
-      gap: 6,
-      padding: '3px 8px',
-      borderRadius: 999,
-      border: '1px solid ' + (active ? 'var(--border-strong)' : 'var(--border-color)'),
-      background: active ? 'var(--bg-surface)' : 'transparent',
+      gap: 5,
+      padding: '2px 4px',
+      border: 'none',
+      background: 'transparent',
       color: active ? 'var(--text-primary)' : 'var(--text-muted)',
       fontSize: 11,
       fontWeight: 500,
-      opacity: active ? 1 : 0.6,
+      opacity: active ? 1 : 0.45,
       cursor: 'pointer',
+      whiteSpace: 'nowrap',
     }}
   >
-    {dotOnly ? (
-      <span
-        style={{
-          width: 7,
-          height: 7,
-          borderRadius: '50%',
-          border: `2px solid ${color}`,
-        }}
-      />
-    ) : (
-      <span
-        style={{
-          width: 12,
-          height: 0,
-          borderTop: `2px ${dashed ? 'dashed' : 'solid'} ${color}`,
-        }}
-      />
-    )}
-    <span>{label}</span>
+    <span
+      style={{
+        width: 11,
+        height: 0,
+        borderTop: `2px ${dashed ? 'dashed' : 'solid'} ${color}`,
+      }}
+    />
+    <span className="mono">{label}</span>
   </button>
 );

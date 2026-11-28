@@ -186,3 +186,147 @@ input[type='range'].rlc-slider::-moz-range-thumb {
     min-height: 680px;
   }
 }
+
+/* Side slide-out pull drawer & animated steps */
+@keyframes solveStepFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes liveValueFade {
+  0% {
+    opacity: 0.55;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes progressBarFill {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+.solve-step-fade {
+  animation: solveStepFadeIn 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.live-value-fade {
+  animation: liveValueFade 0.45s ease-out;
+}
+
+.step-progress-fill {
+  transform-origin: left center;
+  animation: progressBarFill 2.4s linear forwards;
+}
+
+.solution-drawer {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: min(700px, 95vw);
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border-color);
+  box-shadow: -8px 0 28px rgba(0, 0, 0, 0.22);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.side-flow-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  gap: 0;
+  align-items: start;
+}
+
+.side-flow-left {
+  min-width: 0;
+  padding-right: 18px;
+}
+
+.side-flow-right {
+  min-width: 0;
+  padding-left: 18px;
+  border-left: 1px solid var(--border-color);
+}
+
+@media (max-width: 620px) {
+  .side-flow-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .side-flow-left {
+    padding-right: 0;
+  }
+
+  .side-flow-right {
+    padding-left: 0;
+    border-left: none;
+    border-top: 1px solid var(--border-color);
+    padding-top: 8px;
+  }
+}
+
+.solution-drawer.is-closed {
+  transform: translateX(100%);
+  box-shadow: none;
+}
+
+.solution-drawer.is-open {
+  transform: translateX(0);
+}
+
+.solution-drawer.is-dragging {
+  transition: none !important;
+}
+
+.katex {
+  font-size: 1.02em;
+}
+
+.katex-display {
+  margin: 0.35em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 0;
+}
+
+input[type='number'].param-num-input {
+  width: 60px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  padding: 2px 6px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent);
+  text-align: right;
+  outline: none;
+  -moz-appearance: textfield;
+}
+
+input[type='number'].param-num-input:focus {
+  border-color: var(--accent);
+}
+
+input[type='number'].param-num-input::-webkit-inner-spin-button,
+input[type='number'].param-num-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}

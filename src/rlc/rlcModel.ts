@@ -1,3 +1,4 @@
+export type ThemeMode = 'dark' | 'light';
 export type DampingRegime = 'overdamped' | 'critically_damped' | 'underdamped';
 
 export interface RLCParams {
@@ -66,11 +67,14 @@ export interface RLCInstantState {
 
 export interface VerificationRow {
   t: number;
-  qp: number;
-  qh: number;
-  qAnalytical: number;
-  qNumerical: number;
-  absError: number;
+  qp: number;          // Isolated steady-state charge q_p(t) (C)
+  qh: number;          // Complementary transient charge q_h(t) (C)
+  q: number;           // Complete charge q(t) = q_h(t) + q_p(t) (C)
+  ip: number;          // Steady-state current i_p(t) = q_p'(t) (A)
+  odeLhs: number;      // L*q''(t) + R*q'(t) + (1/C)*q(t) (V)
+  emf: number;         // E(t) = E0 * sin(gamma * t) (V)
+  odeResidual: number; // |odeLhs - emf| (V)
+  qpResidual: number;  // |L*qp''(t) + R*qp'(t) + (1/C)*qp(t) - E(t)| (V)
 }
 
 export const PRESETS: RLCPreset[] = [
@@ -292,126 +296,68 @@ export function sampleWaveforms(sys: RLCSystem, tMax: number, count = 500): RLCI
 }
 
 /**
- * Adaptive Dormand-Prince RK45 (5(4) explicit Runge-Kutta) numerical solver
- * for the state-space system:
- *   dq/dt = i
- *   di/dt = (E0 * sin(gamma * t) - R * i - q / C) / L
- *
- * Clamps each step directly onto sorted checkpoints so there is zero interpolation error.
+ * Compute exact analytical second derivatives q_p''(t), q_h''(t), and q''(t)
+ * for direct substitution into the governing KVL differential equation:
+ *   L * q''(t) + R * q'(t) + (1/C) * q(t) = E(t)
  */
-export function solveRK45(params: RLCParams, checkpoints: number[]): VerificationRow[] {
-  const sys = analyzeRLC(params);
-  const { R, L, C, E0, gamma, q0, i0 } = sys.params;
+export function evaluateSecondDerivative(
+  sys: RLCSystem,
+  t: number
+): { qpp: number; qhp: number; qTotalDD: number } {
+  const { gamma } = sys.params;
+  const sinGt = Math.sin(gamma * t);
+  const cosGt = Math.cos(gamma * t);
+  const qp = sys.A * sinGt + sys.B * cosGt;
+  const qpp = -(gamma * gamma) * qp;
 
-  const sorted = [...checkpoints].sort((a, b) => a - b);
-  if (sorted.length === 0) return [];
-
-  const deriv = (t: number, q: number, i: number): [number, number] => [
-    i,
-    (E0 * Math.sin(gamma * t) - R * i - q / C) / L,
-  ];
-
-  // Dormand-Prince Butcher tableau coefficients
-  const c2 = 1 / 5, c3 = 3 / 10, c4 = 4 / 5, c5 = 8 / 9;
-  const a21 = 1 / 5;
-  const a31 = 3 / 40, a32 = 9 / 40;
-  const a41 = 44 / 45, a42 = -56 / 15, a43 = 32 / 9;
-  const a51 = 19372 / 6561, a52 = -25360 / 2187, a53 = 64448 / 6561, a54 = -212 / 729;
-  const a61 = 9017 / 3168, a62 = -355 / 33, a63 = 46732 / 5247, a64 = 49 / 176, a65 = -5103 / 18656;
-
-  // 5th-order weights
-  const b1 = 35 / 384, b3 = 500 / 1113, b4 = 125 / 192, b5 = -2187 / 6784, b6 = 11 / 84;
-  // Error coefficients (b_i - b*_i)
-  const e1 = 71 / 57600, e3 = -71 / 16695, e4 = 71 / 1920, e5 = -17253 / 339200, e6 = 22 / 525, e7 = -1 / 40;
-
-  const rtol = 1e-10;
-  const atol = 1e-12;
-
-  let t = 0;
-  let q = q0;
-  let i = i0;
-  let h = Math.min(1e-4, Math.max(1e-7, (sorted[0] || 0.01) * 0.05));
-
-  const results = new Map<number, number>();
-
-  for (const targetT of sorted) {
-    if (targetT <= 0) {
-      results.set(targetT, q0);
-      continue;
-    }
-
-    let steps = 0;
-    while (t < targetT - 1e-15 && steps < 500000) {
-      steps++;
-      let hitTarget = false;
-      let stepH = h;
-      if (t + stepH >= targetT) {
-        stepH = targetT - t;
-        hitTarget = true;
-      }
-
-      const [k1q, k1i] = deriv(t, q, i);
-      const [k2q, k2i] = deriv(t + c2 * stepH, q + stepH * a21 * k1q, i + stepH * a21 * k1i);
-      const [k3q, k3i] = deriv(
-        t + c3 * stepH,
-        q + stepH * (a31 * k1q + a32 * k2q),
-        i + stepH * (a31 * k1i + a32 * k2i)
-      );
-      const [k4q, k4i] = deriv(
-        t + c4 * stepH,
-        q + stepH * (a41 * k1q + a42 * k2q + a43 * k3q),
-        i + stepH * (a41 * k1i + a42 * k2i + a43 * k3i)
-      );
-      const [k5q, k5i] = deriv(
-        t + c5 * stepH,
-        q + stepH * (a51 * k1q + a52 * k2q + a53 * k3q + a54 * k4q),
-        i + stepH * (a51 * k1i + a52 * k2i + a53 * k3i + a54 * k4i)
-      );
-      const [k6q, k6i] = deriv(
-        t + stepH,
-        q + stepH * (a61 * k1q + a62 * k2q + a63 * k3q + a64 * k4q + a65 * k5q),
-        i + stepH * (a61 * k1i + a62 * k2i + a63 * k3i + a64 * k4i + a65 * k5i)
-      );
-
-      const qNext = q + stepH * (b1 * k1q + b3 * k3q + b4 * k4q + b5 * k5q + b6 * k6q);
-      const iNext = i + stepH * (b1 * k1i + b3 * k3i + b4 * k4i + b5 * k5i + b6 * k6i);
-
-      const [k7q, k7i] = deriv(t + stepH, qNext, iNext);
-
-      const errQ = stepH * (e1 * k1q + e3 * k3q + e4 * k4q + e5 * k5q + e6 * k6q + e7 * k7q);
-      const errI = stepH * (e1 * k1i + e3 * k3i + e4 * k4i + e5 * k5i + e6 * k6i + e7 * k7i);
-
-      const scaleQ = atol + rtol * Math.max(Math.abs(q), Math.abs(qNext));
-      const scaleI = atol + rtol * Math.max(Math.abs(i), Math.abs(iNext));
-      const errNorm = Math.sqrt(0.5 * ((errQ / scaleQ) ** 2 + (errI / scaleI) ** 2));
-
-      if (errNorm <= 1.0 || stepH <= 1e-13) {
-        t = hitTarget ? targetT : t + stepH;
-        q = qNext;
-        i = iNext;
-        const factor = errNorm === 0 ? 2.0 : Math.min(2.5, Math.max(0.2, 0.9 * Math.pow(errNorm, -0.2)));
-        if (!hitTarget) {
-          h = Math.min(0.01, stepH * factor);
-        }
-      } else {
-        const factor = Math.max(0.1, 0.9 * Math.pow(errNorm, -0.25));
-        h = stepH * factor;
-      }
-    }
-
-    results.set(targetT, q);
+  let qhp = 0;
+  if (sys.regime === 'overdamped') {
+    const e1 = Math.exp(sys.m1 * t);
+    const e2 = Math.exp(sys.m2 * t);
+    qhp = sys.m1 * sys.m1 * sys.c1 * e1 + sys.m2 * sys.m2 * sys.c2 * e2;
+  } else if (sys.regime === 'critically_damped') {
+    const e = Math.exp(-sys.alpha * t);
+    const a = sys.alpha;
+    qhp = e * (a * a * sys.c1 - 2 * a * sys.c2 + a * a * sys.c2 * t);
+  } else {
+    const e = Math.exp(-sys.alpha * t);
+    const a = sys.alpha;
+    const w = sys.omegaD;
+    const cosWd = Math.cos(w * t);
+    const sinWd = Math.sin(w * t);
+    qhp =
+      e *
+      (((a * a - w * w) * sys.c1 - 2 * a * w * sys.c2) * cosWd +
+        ((a * a - w * w) * sys.c2 + 2 * a * w * sys.c1) * sinWd);
   }
 
-  return checkpoints.map((cp) => {
-    const inst = evaluateRLC(sys, cp);
-    const qNum = results.get(cp) ?? inst.q;
+  return { qpp, qhp, qTotalDD: qpp + qhp };
+}
+
+/**
+ * Evaluate analytical checkpoints and verify direct substitution into the
+ * governing KVL differential equation L*q''(t) + R*q'(t) + (1/C)*q(t) = E(t).
+ */
+export function verifyAnalyticalCheckpoints(
+  sys: RLCSystem,
+  checkpoints: number[]
+): VerificationRow[] {
+  const { R, L, C } = sys.params;
+  return checkpoints.map((t) => {
+    const inst = evaluateRLC(sys, t);
+    const { qpp, qTotalDD } = evaluateSecondDerivative(sys, t);
+    const odeLhs = L * qTotalDD + R * inst.i + inst.q / C;
+    const qpLhs = L * qpp + R * inst.ip + inst.qp / C;
     return {
-      t: cp,
+      t,
       qp: inst.qp,
       qh: inst.qh,
-      qAnalytical: inst.q,
-      qNumerical: qNum,
-      absError: Math.abs(inst.q - qNum),
+      q: inst.q,
+      ip: inst.ip,
+      odeLhs,
+      emf: inst.E,
+      odeResidual: Math.abs(odeLhs - inst.E),
+      qpResidual: Math.abs(qpLhs - inst.E),
     };
   });
 }

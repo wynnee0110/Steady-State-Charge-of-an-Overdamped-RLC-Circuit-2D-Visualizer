@@ -1,4 +1,4 @@
-import { PRESETS, analyzeRLC, evaluateRLC, solveRK45 } from './rlcModel';
+import { PRESETS, analyzeRLC, evaluateRLC, verifyAnalyticalCheckpoints } from './rlcModel';
 
 function assert(cond: boolean, msg: string) {
   if (!cond) throw new Error('Assertion failed: ' + msg);
@@ -9,7 +9,7 @@ function assertNear(actual: number, expected: number, tol: number, label: string
   assert(diff <= tol, `${label}: expected ${expected} ± ${tol}, got ${actual} (diff=${diff})`);
 }
 
-console.log('Running Overdamped Series RLC Analytical & RK45 Tests...');
+console.log('Running Math 221 Overdamped Series RLC Analytical & DE Tests...');
 
 // 1. Case 1: Standard Academic Moderate Damping (Methodology.tex Table 1 & Table 2)
 {
@@ -32,10 +32,10 @@ console.log('Running Overdamped Series RLC Analytical & RK45 Tests...');
   assertNear(s030.qp * 1000, -1.9602, 1e-3, 'Case 1 qp(0.30) mC');
   assertNear(s030.q * 1000, -1.8141, 1e-3, 'Case 1 q(0.30) mC');
 
-  const rows = solveRK45(p.params, p.checkpoints);
-  const maxErr = Math.max(...rows.map((r) => r.absError));
-  assert(maxErr < 1e-10, `Case 1 RK45 max error ${maxErr} >= 1e-10 C`);
-  console.log(`  ✓ Case 1 Moderate verified (Δ=+600, max RK45 err=${maxErr.toExponential(2)} C)`);
+  const rows = verifyAnalyticalCheckpoints(sys, p.checkpoints);
+  const maxRes = Math.max(...rows.map((r) => Math.max(r.odeResidual, r.qpResidual)));
+  assert(maxRes < 1e-11, `Case 1 DE residual ${maxRes} >= 1e-11 V`);
+  console.log(`  ✓ Case 1 Moderate verified (Δ=+600, max DE residual=${maxRes.toExponential(2)} V)`);
 }
 
 // 2. Case 2: Heavy Damping (Methodology.tex Table 3)
@@ -53,10 +53,10 @@ console.log('Running Overdamped Series RLC Analytical & RK45 Tests...');
   const s020 = evaluateRLC(sys, 0.2);
   assertNear(s020.q * 1000, 2.2496, 1e-3, 'Case 2 q(0.20) mC');
 
-  const rows = solveRK45(p.params, p.checkpoints);
-  const maxErr = Math.max(...rows.map((r) => r.absError));
-  assert(maxErr < 1e-10, `Case 2 RK45 max error ${maxErr} >= 1e-10 C`);
-  console.log(`  ✓ Case 2 Heavy verified (Δ=+6000, max RK45 err=${maxErr.toExponential(2)} C)`);
+  const rows = verifyAnalyticalCheckpoints(sys, p.checkpoints);
+  const maxRes = Math.max(...rows.map((r) => Math.max(r.odeResidual, r.qpResidual)));
+  assert(maxRes < 1e-11, `Case 2 DE residual ${maxRes} >= 1e-11 V`);
+  console.log(`  ✓ Case 2 Heavy verified (Δ=+6000, max DE residual=${maxRes.toExponential(2)} V)`);
 }
 
 // 3. Case 3: Near-Critical Overdamping (Methodology.tex Table 4)
@@ -73,21 +73,29 @@ console.log('Running Overdamped Series RLC Analytical & RK45 Tests...');
   const s030 = evaluateRLC(sys, 0.3);
   assertNear(s030.q * 1000, 8.9911, 1e-3, 'Case 3 q(0.30) mC');
 
-  const rows = solveRK45(p.params, p.checkpoints);
-  const maxErr = Math.max(...rows.map((r) => r.absError));
-  assert(maxErr < 1e-10, `Case 3 RK45 max error ${maxErr} >= 1e-10 C`);
-  console.log(`  ✓ Case 3 Near-Critical verified (Δ=+225, max RK45 err=${maxErr.toExponential(2)} C)`);
+  const rows = verifyAnalyticalCheckpoints(sys, p.checkpoints);
+  const maxRes = Math.max(...rows.map((r) => Math.max(r.odeResidual, r.qpResidual)));
+  assert(maxRes < 1e-11, `Case 3 DE residual ${maxRes} >= 1e-11 V`);
+  console.log(`  ✓ Case 3 Near-Critical verified (Δ=+225, max DE residual=${maxRes.toExponential(2)} V)`);
 }
 
-// 4. Initial conditions, KVL, Critically Damped, Underdamped
+// 4. Initial conditions, Lecture 5.1 steady-state current identity, KVL, critically & underdamped DE residuals
 {
   for (const p of PRESETS) {
     const sys = analyzeRLC(p.params);
     const s0 = evaluateRLC(sys, 0);
     assertNear(s0.q, p.params.q0, 1e-14, `${p.id} q(0)`);
     assertNear(s0.i, p.params.i0, 1e-14, `${p.id} i(0)`);
-    const sMid = evaluateRLC(sys, 0.123);
+
+    const t = 0.123;
+    const sMid = evaluateRLC(sys, t);
     assertNear(sMid.vL + sMid.vR + sMid.vC, sMid.E, 1e-12, `${p.id} KVL`);
+
+    // Lecture 5.1 steady-state current identity: ip(t) = (E0/Z)*((R/Z)*sin(gamma*t) - (X/Z)*cos(gamma*t))
+    const { R, E0, gamma } = sys.params;
+    const ipLecture =
+      (E0 / sys.Z) * ((R / sys.Z) * Math.sin(gamma * t) - (sys.X / sys.Z) * Math.cos(gamma * t));
+    assertNear(sMid.ip, ipLecture, 1e-14, `${p.id} Lecture 5.1 ip(t)`);
   }
 
   // Critically damped: L=0.5, C=0.002 => R_crit = 2*sqrt(250)
@@ -98,8 +106,11 @@ console.log('Running Overdamped Series RLC Analytical & RK45 Tests...');
   const crit0 = evaluateRLC(critSys, 0);
   assertNear(crit0.q, critParams.q0, 1e-14, 'Crit q(0)');
   assertNear(crit0.i, critParams.i0, 1e-14, 'Crit i(0)');
-  const critRows = solveRK45(critParams, [0.05, 0.15]);
-  assert(Math.max(...critRows.map((r) => r.absError)) < 1e-10, 'Crit RK45 error < 1e-10 C');
+  const critRows = verifyAnalyticalCheckpoints(critSys, [0.05, 0.15]);
+  assert(
+    Math.max(...critRows.map((r) => Math.max(r.odeResidual, r.qpResidual))) < 1e-11,
+    'Crit DE residual < 1e-11 V'
+  );
 
   // Underdamped: R=10
   const underParams = { R: 10, L: 0.5, C: 0.002, E0: 24, gamma: 60, q0: -0.002, i0: 0.5 };
@@ -108,10 +119,13 @@ console.log('Running Overdamped Series RLC Analytical & RK45 Tests...');
   const under0 = evaluateRLC(underSys, 0);
   assertNear(under0.q, underParams.q0, 1e-14, 'Under q(0)');
   assertNear(under0.i, underParams.i0, 1e-14, 'Under i(0)');
-  const underRows = solveRK45(underParams, [0.05, 0.15]);
-  assert(Math.max(...underRows.map((r) => r.absError)) < 1e-10, 'Under RK45 error < 1e-10 C');
+  const underRows = verifyAnalyticalCheckpoints(underSys, [0.05, 0.15]);
+  assert(
+    Math.max(...underRows.map((r) => Math.max(r.odeResidual, r.qpResidual))) < 1e-11,
+    'Under DE residual < 1e-11 V'
+  );
 
-  console.log('  ✓ Initial conditions, KVL, critically damped, and underdamped regimes verified');
+  console.log('  ✓ Initial conditions, Lecture 5.1 current identity, KVL, and all damping DE residuals verified');
 }
 
-console.log('ALL RLC MODEL TESTS PASSED!');
+console.log('ALL MATH 221 RLC TESTS PASSED!');

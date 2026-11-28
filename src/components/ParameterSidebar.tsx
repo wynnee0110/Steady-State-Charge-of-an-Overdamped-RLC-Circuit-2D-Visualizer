@@ -1,21 +1,26 @@
 import React, { useEffect, useState } from 'react';
-import { ChevronDown, ChevronRight } from 'lucide-react';
-import { RLCParams, RLCSystem } from '../rlc/rlcModel';
+import { ChevronDown, ChevronRight, Moon, Sun } from 'lucide-react';
+import { RLCParams, RLCSystem, ThemeMode } from '../rlc/rlcModel';
+import { MathTex } from './MathTex';
 
 export type FocusedComponent = 'R' | 'L' | 'C' | 'E' | null;
 
 interface ParameterSidebarProps {
   params: RLCParams;
   system: RLCSystem;
+  theme: ThemeMode;
   focusedComponent: FocusedComponent;
   onChangeParams: (patch: Partial<RLCParams>) => void;
+  onToggleTheme: () => void;
 }
 
 export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
   params,
   system,
+  theme,
   focusedComponent,
   onChangeParams,
+  onToggleTheme,
 }) => {
   const [icOpen, setIcOpen] = useState(params.q0 !== 0 || params.i0 !== 0);
 
@@ -50,8 +55,8 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
   const bMc = system.B * 1000;
   const qMaxMc = system.Qmax * 1000;
 
-  const formatSigned = (val: number, digits = 3) =>
-    `${val >= 0 ? '+' : '−'}${Math.abs(val).toFixed(digits)}`;
+  const bSign = bMc >= 0 ? '+' : '-';
+  const qpLatex = `q_p(t) = ${aMc.toFixed(3)}\\sin(${params.gamma.toFixed(0)}t) ${bSign} ${Math.abs(bMc).toFixed(3)}\\cos(${params.gamma.toFixed(0)}t)\\;[\\text{mC}]`;
 
   return (
     <aside
@@ -62,9 +67,35 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
         flexDirection: 'column',
         overflowY: 'auto',
         padding: 16,
-        gap: 16,
+        gap: 14,
       }}
     >
+      {/* Minimal title + theme toggle */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span style={{ fontWeight: 600, fontSize: 13.5, letterSpacing: '-0.01em' }}>
+          Overdamped RLC
+        </span>
+        <button
+          type="button"
+          title={theme === 'dark' ? 'Light mode' : 'Dark mode'}
+          onClick={onToggleTheme}
+          style={{
+            width: 26,
+            height: 26,
+            borderRadius: 6,
+            border: 'none',
+            background: 'transparent',
+            color: 'var(--text-secondary)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            cursor: 'pointer',
+          }}
+        >
+          {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
+        </button>
+      </div>
+
       {/* 1. Damping Regime Card */}
       <section style={cardStyle}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
@@ -138,15 +169,17 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
       </section>
 
       {/* 2. Circuit Parameters */}
-      <section style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
+      <section style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <div style={sectionTitle}>Circuit Parameters</div>
 
         <SliderField
           label="Resistance (R)"
-          sublabel={`R_crit = ${system.rCrit.toFixed(1)} Ω`}
-          valueDisplay={`${params.R.toFixed(1)} Ω`}
+          sublabel={`R_crit=${system.rCrit.toFixed(1)}`}
+          unit="Ω"
+          decimals={1}
           min={5}
           max={200}
+          hardMin={0.1}
           step={0.5}
           value={params.R}
           highlighted={focusedComponent === 'R'}
@@ -155,9 +188,11 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
 
         <SliderField
           label="Inductance (L)"
-          valueDisplay={`${params.L.toFixed(2)} H`}
+          unit="H"
+          decimals={2}
           min={0.05}
           max={2.0}
+          hardMin={0.001}
           step={0.01}
           value={params.L}
           highlighted={focusedComponent === 'L'}
@@ -166,9 +201,11 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
 
         <SliderField
           label="Capacitance (C)"
-          valueDisplay={`${(params.C * 1000).toFixed(1)} mF`}
+          unit="mF"
+          decimals={1}
           min={0.2}
           max={5.0}
+          hardMin={0.01}
           step={0.1}
           value={params.C * 1000}
           highlighted={focusedComponent === 'C'}
@@ -176,10 +213,12 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
         />
 
         <SliderField
-          label="Source Amplitude (E₀)"
-          valueDisplay={`${params.E0.toFixed(0)} V`}
+          label="Amplitude (E₀)"
+          unit="V"
+          decimals={0}
           min={1}
           max={100}
+          hardMin={0.1}
           step={1}
           value={params.E0}
           highlighted={focusedComponent === 'E'}
@@ -187,11 +226,13 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
         />
 
         <SliderField
-          label="Angular Freq (γ)"
-          sublabel={`${(params.gamma / (2 * Math.PI)).toFixed(1)} Hz`}
-          valueDisplay={`${params.gamma.toFixed(0)} rad/s`}
+          label="Frequency (γ)"
+          sublabel={`${(params.gamma / (2 * Math.PI)).toFixed(1)}Hz`}
+          unit="rad/s"
+          decimals={0}
           min={5}
           max={200}
+          hardMin={0.5}
           step={1}
           value={params.gamma}
           highlighted={focusedComponent === 'E'}
@@ -235,7 +276,8 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
             <SliderField
               label="Initial Charge (q₀)"
-              valueDisplay={`${(params.q0 * 1000).toFixed(1)} mC`}
+              unit="mC"
+              decimals={1}
               min={-15}
               max={15}
               step={0.5}
@@ -244,7 +286,8 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
             />
             <SliderField
               label="Initial Current (i₀)"
-              valueDisplay={`${params.i0.toFixed(2)} A`}
+              unit="A"
+              decimals={2}
               min={-2}
               max={2}
               step={0.05}
@@ -255,26 +298,18 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
         )}
       </section>
 
-      {/* 4. Steady-State Solution Summary */}
-      <section style={{ ...cardStyle, marginTop: 'auto' }}>
-        <div style={{ ...sectionTitle, marginBottom: 8 }}>Steady-State Solution</div>
+      {/* 4. Steady-State Solution Summary (LaTeX) */}
+      <section style={{ borderTop: '1px solid var(--border-color)', paddingTop: 12, marginTop: 'auto' }}>
+        <div style={{ ...sectionTitle, marginBottom: 6 }}>Steady-State Solution</div>
 
         <div
-          className="mono"
           style={{
-            fontSize: 11.5,
-            lineHeight: 1.5,
-            padding: '8px 10px',
-            borderRadius: 6,
-            background: 'var(--bg-input)',
-            border: '1px solid var(--border-color)',
             color: 'var(--trace-qp)',
             marginBottom: 10,
-            wordBreak: 'break-word',
+            fontSize: 11.5,
           }}
         >
-          qₚ(t) = {aMc.toFixed(3)} sin({params.gamma.toFixed(0)}t){' '}
-          {formatSigned(bMc, 3)} cos({params.gamma.toFixed(0)}t) mC
+          <MathTex display tex={qpLatex} />
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
@@ -297,9 +332,11 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
 interface SliderFieldProps {
   label: string;
   sublabel?: string;
-  valueDisplay: string;
+  unit: string;
+  decimals: number;
   min: number;
   max: number;
+  hardMin?: number;
   step: number;
   value: number;
   highlighted?: boolean;
@@ -309,47 +346,87 @@ interface SliderFieldProps {
 const SliderField: React.FC<SliderFieldProps> = ({
   label,
   sublabel,
-  valueDisplay,
+  unit,
+  decimals,
   min,
   max,
+  hardMin,
   step,
   value,
   highlighted,
   onChange,
-}) => (
-  <div
-    style={{
-      padding: '6px 8px',
-      borderRadius: 7,
-      background: highlighted ? 'var(--accent-soft)' : 'transparent',
-      border: '1px solid ' + (highlighted ? 'var(--accent)' : 'transparent'),
-      transition: 'background 0.15s ease, border-color 0.15s ease',
-    }}
-  >
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 5 }}>
-      <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>
-        {label}
-        {sublabel && (
-          <span style={{ marginLeft: 5, fontSize: 10.5, color: 'var(--text-muted)', fontWeight: 400 }}>
-            {sublabel}
+}) => {
+  const [draft, setDraft] = useState(() => value.toFixed(decimals));
+
+  useEffect(() => {
+    setDraft(Number.isInteger(value) && decimals === 0 ? String(value) : value.toFixed(decimals));
+  }, [value, decimals]);
+
+  const commitDraft = () => {
+    const parsed = parseFloat(draft);
+    if (!Number.isFinite(parsed)) {
+      setDraft(value.toFixed(decimals));
+      return;
+    }
+    const clamped = hardMin !== undefined ? Math.max(hardMin, parsed) : parsed;
+    onChange(clamped);
+    setDraft(clamped.toFixed(decimals));
+  };
+
+  return (
+    <div
+      style={{
+        padding: '5px 8px',
+        borderRadius: 7,
+        background: highlighted ? 'var(--accent-soft)' : 'transparent',
+        border: '1px solid ' + (highlighted ? 'var(--accent)' : 'transparent'),
+        transition: 'background 0.15s ease, border-color 0.15s ease',
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6, marginBottom: 5 }}>
+        <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)', minWidth: 0 }}>
+          {label}
+          {sublabel && (
+            <span style={{ marginLeft: 5, fontSize: 10, color: 'var(--text-muted)', fontWeight: 400 }}>
+              {sublabel}
+            </span>
+          )}
+        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+          <input
+            className="param-num-input"
+            type="number"
+            step={step}
+            value={draft}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              const parsed = parseFloat(e.target.value);
+              if (Number.isFinite(parsed) && (hardMin === undefined || parsed >= hardMin)) {
+                onChange(parsed);
+              }
+            }}
+            onBlur={commitDraft}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+            }}
+          />
+          <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-muted)', minWidth: 16 }}>
+            {unit}
           </span>
-        )}
-      </span>
-      <span className="mono" style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent)' }}>
-        {valueDisplay}
-      </span>
+        </div>
+      </div>
+      <input
+        className="rlc-slider"
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={Math.max(min, Math.min(max, value))}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+      />
     </div>
-    <input
-      className="rlc-slider"
-      type="range"
-      min={min}
-      max={max}
-      step={step}
-      value={value}
-      onChange={(e) => onChange(parseFloat(e.target.value))}
-    />
-  </div>
-);
+  );
+};
 
 const Metric: React.FC<{ label: string; value: string }> = ({ label, value }) => (
   <div>

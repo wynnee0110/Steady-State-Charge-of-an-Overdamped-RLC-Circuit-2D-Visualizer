@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { RLCInstantState, RLCSystem } from '../rlc/rlcModel';
+import { RLCInstantState, RLCSystem, ThemeMode } from '../rlc/rlcModel';
 import { FocusedComponent } from './ParameterSidebar';
-import { ThemeMode } from './Header';
 
 interface CircuitSchematicProps {
   system: RLCSystem;
